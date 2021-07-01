@@ -1,0 +1,99 @@
+import torch
+from torch import nn, Tensor
+class Res2UNet(nn.Module):
+    def __init__(self, in_channel: int, out_channel: int):
+        super(Res2UNet, self).__init__()
+        self.step1 = DoubleConv(in_channel, 64)
+        self.step2 = DoubleConv(64, 128)
+        self.step3 = DoubleConv(128, 256)
+        self.step4 = DoubleConv(256, 512)
+        self.step5 = DoubleConv(512, 1024)
+        self.step6 = Up(1536, 512)
+        self.step7 = Up(768, 256)
+        self.step8 = Up(384, 128)
+        self.step9 = Up(192, 64)
+        self.step10 = nn.Sequential(
+            nn.Conv2d(64, 4, kernel_size=1, stride=1),
+            nn.Softmax2d(),
+        )
+        self.mp = nn.MaxPool2d(2)
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight)
+    def forward(self, x: Tensor) -> Tensor:
+        x1 = self.step1(x)
+        # print('x1:', x1.shape)
+        x = self.mp(x1)
+        x2 = self.step2(x)
+        # print('x2:', x2.shape)
+        x = self.mp(x2)
+        x3 = self.step3(x)
+        # print('x3:',x3.shape)
+        x = self.mp(x3)
+        x4 = self.step4(x)
+        # print('x4:', x4.shape)
+        x = self.mp(x4)
+        x5 = self.step5(x)
+        # print('x5:', x5.shape)
+        x6 = self.step6(x5, x4)
+        x7 = self.step7(x6, x3)
+        x8 = self.step8(x7, x2)
+        x9 = self.step9(x8, x1)
+        x10 = self.step10(x9)
+        return x10
+class Up(nn.Module):
+    def __init__(self, in_channel: int, out_channel: int) -> None:
+        super(Up, self).__init__()
+        self.up = nn.Upsample(scale_factor=2)
+        self.douconv = nn.Sequential(
+            nn.Conv2d(in_channel, out_channel, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channel),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channel, out_channel, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channel),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self, x: Tensor, x1: Tensor) -> Tensor:
+        x = self.up(x)
+        x = torch.cat([x, x1], dim=1)
+        x = self.douconv(x)
+        return x
+class DoubleConv(nn.Module):
+    def __init__(self, in_channel: int, out_channel: int, scale: int = 4) -> None:
+        super(DoubleConv, self).__init__()
+        self.nums = scale - 1
+        self.width = int(out_channel/scale)
+        self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channel)
+        convs, bns = [], []
+        for i in range(self.nums):
+            convs.append(nn.Conv2d(self.width, self.width, kernel_size=3, stride=1, padding=1, bias=False))
+            bns.append(nn.BatchNorm2d(self.width))
+        self.convs = nn.ModuleList(convs)
+        self.bns = nn.ModuleList(bns)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, x: Tensor) -> Tensor:
+        residual = x
+        # print('re_init:', residual.shape)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        out = self.relu(x)
+        # print('out1:', out.shape)
+        spx = torch.split(out, self.width, dim=1)
+        # print('spx:', len(spx))
+        for i in range(self.nums):
+            sp = spx[i]
+            sp = self.convs[i](sp)
+            sp = self.relu(self.bns[i](sp))
+            # print('sp{}:'.format(i), sp.shape)
+            if i == 0:
+                out = sp
+            else:
+                out = torch.cat((out, sp), dim=1)
+            # print('out{}:'.format(i), out.shape)
+        out = torch.cat((out, spx[self.nums]), dim=1)
+        # print('outshape:', out.shape, 'outtype:', type(out))
+        # print('residual:', residual.shape, type(residual))
+        # out += residual
+        out = self.relu(out)
+        return out
